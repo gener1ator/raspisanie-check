@@ -1,0 +1,40 @@
+name: Check Schedule
+
+on:
+  schedule:
+    # Проверка каждые 15 минут
+    - cron: '*/15 * * * *'
+  workflow_dispatch: # Позволяет запускать вручную кнопкой для тестов
+
+permissions:
+  contents: write # Дает право сохранять state.json обратно в репозиторий
+
+jobs:
+  run-checker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Клонирование репозитория
+        uses: actions/checkout@v4
+
+      - name: Установка Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Установка библиотек
+        run: pip install -r requirements.txt
+
+      - name: Запуск проверки
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: python main.py
+
+      - name: Сохранение состояния state.json
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          git commit -m "chore: auto-update schedule state" || echo "Изменений в state.json нет"
+          git push
