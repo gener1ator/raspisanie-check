@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import time
 import requests
 import openpyxl
 from io import BytesIO
@@ -17,7 +18,7 @@ STATE_FILE = "state.json"
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
-# Сетка звонков по расписанию
+# Сетка звонков
 BELL_SCHEDULE = {
     "ПОНЕДЕЛЬНИК": {
         "0 пара": "08:30 – 09:20",
@@ -25,6 +26,7 @@ BELL_SCHEDULE = {
         "2 пара": "10:50 – 12:50",
         "3 пара": "13:00 – 14:20",
         "4 пара": "14:30 – 15:50",
+        "5 пара": "16:00 – 17:20",
     },
     "DEFAULT": {  # Вторник – Пятница
         "1 пара": "08:30 – 09:50",
@@ -44,7 +46,7 @@ BELL_SCHEDULE = {
     }
 }
 
-# Обеды для литеры "Р"
+# Обеды для группы 183Р (литера "Р")
 LUNCH_SCHEDULE = {
     "ПОНЕДЕЛЬНИК": "🥪 <i>Обед: 11:30 – 12:10</i>",
     "DEFAULT": "🥪 <i>Обед: 11:20 – 12:00</i>"
@@ -59,22 +61,24 @@ VALID_DAYS = ["ПОНЕДЕЛЬНИК", "ВТОРНИК", "СРЕДА", "ЧЕТ�
 
 
 def get_latest_commit_sha():
-    """Проверка последнего коммита для файла Excel через GitHub API"""
+    """Проверка последнего коммита для файла через GitHub API"""
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/commits?path={quote(FILE_PATH)}&page=1&per_page=1"
-    res = requests.get(url, timeout=15)
-    if res.status_code == 200:
-        data = res.json()
-        if data:
-            return data[0]["sha"]
+    try:
+        res = requests.get(url, timeout=15)
+        if res.status_code == 200:
+            data = res.json()
+            if data:
+                return data[0]["sha"]
+    except Exception as e:
+        print(f"Ошибка проверки коммита: {e}")
     return None
 
 
 def download_excel():
-    """Скачивание файла в оперативную память"""
+    """Скачивание файла Excel в память"""
     url = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/{quote(FILE_PATH)}"
     res = requests.get(url, timeout=30)
     if res.status_code != 200:
-        # Резервная ветка master
         url = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/master/{quote(FILE_PATH)}"
         res = requests.get(url, timeout=30)
     res.raise_for_status()
@@ -82,7 +86,7 @@ def download_excel():
 
 
 def parse_schedule(file_bytes):
-    """Извлечение расписания для группы 183Р по всем вкладкам"""
+    """Сбор расписания для группы 183Р"""
     wb = openpyxl.load_workbook(file_bytes, data_only=True)
     schedule_data = {}
 
@@ -93,7 +97,7 @@ def parse_schedule(file_bytes):
 
         sheet = wb[sheet_name]
 
-        # 1. Поиск даты в первой строке
+        # 1. Считываем дату из первой строки
         date_str = ""
         for cell in sheet[1]:
             val = str(cell.value or "").strip()
@@ -102,14 +106,14 @@ def parse_schedule(file_bytes):
                 date_str = date_match.group(0)
                 break
 
-        # 2. Поиск колонок с номерами пар во второй строке
+        # 2. Номера пар во второй строке
         pair_columns = {}
         for col_idx, cell in enumerate(sheet[2], start=1):
             val = str(cell.value or "").strip().lower()
             if "пара" in val:
                 pair_columns[col_idx] = cell.value.strip()
 
-        # 3. Поиск строки с группой 183р в столбце A
+        # 3. Поиск строки 183р
         group_row_idx = None
         for row_idx in range(3, sheet.max_row + 1):
             cell_val = str(sheet.cell(row=row_idx, column=1).value or "").strip().lower()
@@ -120,7 +124,7 @@ def parse_schedule(file_bytes):
         if not group_row_idx:
             continue
 
-        # 4. Сбор только тех пар, которые фактически стоят (без пустых)
+        # 4. Сбор только существующих пар (без пустых)
         day_pairs = {}
         for col_idx, pair_name in pair_columns.items():
             cell_val = sheet.cell(row=group_row_idx, column=col_idx).value
@@ -137,24 +141,8 @@ def parse_schedule(file_bytes):
     return schedule_data
 
 
-def format_telegram_message(day_name, day_info, changes):
-    """Генерация красивого HTML-сообщения"""
-    date_str = day_info.get("date", "")
-    header_date = f"{day_name}, {date_str}".strip(", ")
-
-    # Блок изменений
-    diff_lines = []
-    for pair_name, (old_val, new_val) in changes.items():
-        if old_val and new_val:
-            diff_lines.append(f"• <b>{pair_name}:</b> <s>{old_val}</s> ➔ <b>{new_val}</b>")
-        elif not old_val and new_val:
-            diff_lines.append(f"• <b>{pair_name}:</b> <i>добавлена</i> ➔ <b>{new_val}</b>")
-        elif old_val and not new_val:
-            diff_lines.append(f"• <b>{pair_name}:</b> <s>{old_val}</s> ➔ <i>отменена</i>")
-
-    diff_text = "\n".join(diff_lines)
-
-    # Выбор звонков
+def build_schedule_block(day_name, day_info):
+    """Формирует список пар с временем звонков и обедом (только существующие пары)"""
     if day_name == "ПОНЕДЕЛЬНИК":
         bells = BELL_SCHEDULE["ПОНЕДЕЛЬНИК"]
         lunch = LUNCH_SCHEDULE["ПОНЕДЕЛЬНИК"]
@@ -165,21 +153,67 @@ def format_telegram_message(day_name, day_info, changes):
         bells = BELL_SCHEDULE["DEFAULT"]
         lunch = LUNCH_SCHEDULE["DEFAULT"]
 
-    # Блок пар (без «пар нет», только существующие)
-    schedule_lines = []
-    for pair_name, lesson in sorted(day_info.get("pairs", {}).items()):
+    pairs = day_info.get("pairs", {})
+    if not pairs:
+        return "<i>На этот день пар нет</i>"
+
+    # Сортировка по номеру пары
+    def sort_key(item):
+        num_part = item[0].split()[0]
+        return int(num_part) if num_part.isdigit() else 99
+
+    sorted_pairs = sorted(pairs.items(), key=sort_key)
+
+    lines = []
+    for pair_name, lesson in sorted_pairs:
         pair_num = pair_name.split()[0]
         emoji = NUM_EMOJI.get(pair_num, "🔹")
         time_range = bells.get(pair_name, "")
         time_part = f"<b>{time_range}</b> | " if time_range else ""
-        
-        schedule_lines.append(f"{emoji} {time_part}{lesson}")
-        
-        # Добавляем обед после 2-й пары
-        if pair_name == "2 пара" and lunch:
-            schedule_lines.append(f"    ↳ {lunch}")
 
-    schedule_text = "\n".join(schedule_lines)
+        lines.append(f"{emoji} {time_part}{lesson}")
+
+        # Вставка обеда после второй пары
+        if pair_name == "2 пара" and lunch:
+            lines.append(f"    ↳ {lunch}")
+
+    return "\n".join(lines)
+
+
+def format_new_date_message(day_name, day_info):
+    """Сообщение о выходе расписания на новую дату"""
+    date_str = day_info.get("date", "")
+    header_date = f"{day_name}, {date_str}".strip(", ")
+    schedule_text = build_schedule_block(day_name, day_info)
+    now_time = datetime.now().strftime("%d.%m.%Y в %H:%M")
+
+    return (
+        f"📅 <b>Опубликовано расписание на дату!</b>\n\n"
+        f"👥 <b>Группа:</b> {TARGET_GROUP.upper()}\n"
+        f"📆 <b>{header_date}</b>\n\n"
+        f"───────────────────\n"
+        f"📋 <b>АКТУАЛЬНОЕ РАСПИСАНИЕ:</b>\n"
+        f"{schedule_text}\n\n"
+        f"<i>(Обновлено: {now_time})</i>"
+    )
+
+
+def format_replacement_message(day_name, day_info, changes):
+    """Сообщение о точечной замене пар"""
+    date_str = day_info.get("date", "")
+    header_date = f"{day_name}, {date_str}".strip(", ")
+
+    diff_lines = []
+    for pair_name, (old_val, new_val) in sorted(changes.items()):
+        if old_val and new_val:
+            diff_lines.append(f"• <b>{pair_name}:</b> <s>{old_val}</s> ➔ <b>{new_val}</b>")
+        elif not old_val and new_val:
+            diff_lines.append(f"• <b>{pair_name}:</b> <i>добавлена</i> ➔ <b>{new_val}</b>")
+        elif old_val and not new_val:
+            diff_lines.append(f"• <b>{pair_name}:</b> <s>{old_val}</s> ➔ <i>отменена</i>")
+
+    diff_text = "\n".join(diff_lines)
+    schedule_text = build_schedule_block(day_name, day_info)
     now_time = datetime.now().strftime("%d.%m.%Y в %H:%M")
 
     return (
@@ -196,9 +230,9 @@ def format_telegram_message(day_name, day_info, changes):
 
 
 def send_telegram_notification(text):
-    """Отправка сообщения в Telegram"""
+    """Отправка сообщения в чат Telegram"""
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        print("Ошибка: Токен или ID чата не настроены!")
+        print("Ошибка: TG_BOT_TOKEN или TG_CHAT_ID не заданы!")
         return
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     payload = {
@@ -212,7 +246,7 @@ def send_telegram_notification(text):
 
 
 def main():
-    # 1. Загрузка старого состояния
+    # 1. Загрузка прошлого состояния
     state = {}
     if os.path.exists(STATE_FILE):
         try:
@@ -224,33 +258,48 @@ def main():
     last_sha = state.get("last_commit_sha")
     old_schedule = state.get("schedule", {})
 
-    # 2. Быстрая проверка изменений файла в репозитории
+    # 2. Проверка обновления файла на GitHub
     current_sha = get_latest_commit_sha()
     if current_sha and current_sha == last_sha:
-        print("Файл не обновлялся в репозитории. Выход.")
+        print("Файл не менялся. Завершение работы.")
         return
 
-    # 3. Скачиваем и парсим
-    print("Обнаружен новый коммит или первый запуск! Скачиваем Excel...")
+    # 3. Скачиваем свежий файл
+    print("Обнаружено обновление файла. Скачиваем...")
     excel_bytes = download_excel()
     new_schedule = parse_schedule(excel_bytes)
 
-    # 4. Первый запуск — просто сохраняем данные без спама
+    # 4. Первый запуск: сохраняем базу без отправки
     if not old_schedule:
-        print("Первый запуск: сохраняем первичное состояние.")
+        print("Первый запуск: снимок расписания сохранен в state.json.")
         state["last_commit_sha"] = current_sha
         state["schedule"] = new_schedule
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
         return
 
-    # 5. Поиск точечных изменений именно для 183р
-    has_changes = False
+    # 5. Проверка изменений для группы 183р
+    has_notified = False
+
     for day, new_info in new_schedule.items():
-        old_info = old_schedule.get(day, {"pairs": {}})
+        old_info = old_schedule.get(day, {"pairs": {}, "date": ""})
         old_pairs = old_info.get("pairs", {})
         new_pairs = new_info.get("pairs", {})
 
+        old_date = old_info.get("date", "").strip()
+        new_date = new_info.get("date", "").strip()
+
+        # СИТУАЦИЯ 1: Сменилась дата (выкатили новую неделю)
+        if new_date and old_date and new_date != old_date:
+            if new_pairs:  # Шлем только если есть хотя бы одна пара
+                print(f"Новая дата для {day}: {new_date}")
+                msg = format_new_date_message(day, new_info)
+                send_telegram_notification(msg)
+                has_notified = True
+                time.sleep(1)  # Защита от лимитов Telegram
+            continue
+
+        # СИТУАЦИЯ 2: Дата та же, но внутри дня есть замены пар
         all_pair_names = set(old_pairs.keys()).union(new_pairs.keys())
         day_changes = {}
 
@@ -261,15 +310,16 @@ def main():
                 day_changes[p_name] = (old_val, new_val)
 
         if day_changes:
-            has_changes = True
-            print(f"Найдены изменения для 183р на день: {day}")
-            msg = format_telegram_message(day, new_info, day_changes)
+            print(f"Замены на {day} для 183р")
+            msg = format_replacement_message(day, new_info, day_changes)
             send_telegram_notification(msg)
+            has_notified = True
+            time.sleep(1)
 
-    if not has_changes:
-        print("Файл изменился, но пары группы 183Р не затронуты. Сообщение не отправлено.")
+    if not has_notified:
+        print("Файл обновился, но группу 183Р изменения не коснулись.")
 
-    # 6. Обновляем локальное состояние
+    # 6. Запоминаем новое состояние
     state["last_commit_sha"] = current_sha
     state["schedule"] = new_schedule
     with open(STATE_FILE, "w", encoding="utf-8") as f:
