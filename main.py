@@ -6,7 +6,7 @@ import requests
 import openpyxl
 from io import BytesIO
 from urllib.parse import quote
-from datetime import datetime
+from datetime import datetime, date
 
 # ================= КОНФИГУРАЦИЯ =================
 REPO_OWNER = "colderuopen-art"
@@ -61,7 +61,7 @@ VALID_DAYS = ["ПОНЕДЕЛЬНИК", "ВТОРНИК", "СРЕДА", "ЧЕТ�
 
 
 def get_latest_commit_sha():
-    """Проверка последнего коммита для файла через GitHub API"""
+    """Проверка коммита через GitHub API"""
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/commits?path={quote(FILE_PATH)}&page=1&per_page=1"
     try:
         res = requests.get(url, timeout=15)
@@ -85,6 +85,37 @@ def download_excel():
     return BytesIO(res.content)
 
 
+def extract_date_from_sheet(sheet):
+    """Универсальное извлечение даты из первых трех строк вкладки"""
+    for row in sheet.iter_rows(min_row=1, max_row=3, values_only=False):
+        for cell in row:
+            val = cell.value
+            if not val:
+                continue
+
+            # 1. Если ячейка имеет встроенный формат даты Excel
+            if isinstance(val, (datetime, date)):
+                return val.strftime("%d.%m.%Y")
+
+            val_str = str(val).strip()
+
+            # 2. Поиск формата 3.9.2026 или 03.09.2026
+            match_dot = re.search(r"\b\d{1,2}\.\d{1,2}\.\d{2,4}\b", val_str)
+            if match_dot:
+                return match_dot.group(0)
+
+            # 3. Поиск формата 2026-09-03
+            match_iso = re.search(r"\b\d{4}-\d{1,2}-\d{1,2}\b", val_str)
+            if match_iso:
+                try:
+                    dt = datetime.strptime(match_iso.group(0), "%Y-%m-%d")
+                    return dt.strftime("%d.%m.%Y")
+                except Exception:
+                    return match_iso.group(0)
+
+    return ""
+
+
 def parse_schedule(file_bytes):
     """Сбор расписания для группы 183Р"""
     wb = openpyxl.load_workbook(file_bytes, data_only=True)
@@ -97,23 +128,17 @@ def parse_schedule(file_bytes):
 
         sheet = wb[sheet_name]
 
-        # 1. Считываем дату из первой строки
-        date_str = ""
-        for cell in sheet[1]:
-            val = str(cell.value or "").strip()
-            date_match = re.search(r"\d{1,2}\.\d{1,2}\.\d{2,4}", val)
-            if date_match:
-                date_str = date_match.group(0)
-                break
+        # 1. Надежный поиск даты
+        date_str = extract_date_from_sheet(sheet)
 
-        # 2. Номера пар во второй строке
+        # 2. Поиск номеров пар во 2-й строке
         pair_columns = {}
         for col_idx, cell in enumerate(sheet[2], start=1):
             val = str(cell.value or "").strip().lower()
             if "пара" in val:
                 pair_columns[col_idx] = cell.value.strip()
 
-        # 3. Поиск строки 183р
+        # 3. Поиск строки группы 183р
         group_row_idx = None
         for row_idx in range(3, sheet.max_row + 1):
             cell_val = str(sheet.cell(row=row_idx, column=1).value or "").strip().lower()
@@ -124,7 +149,7 @@ def parse_schedule(file_bytes):
         if not group_row_idx:
             continue
 
-        # 4. Сбор только существующих пар (без пустых)
+        # 4. Сбор только заполненных пар
         day_pairs = {}
         for col_idx, pair_name in pair_columns.items():
             cell_val = sheet.cell(row=group_row_idx, column=col_idx).value
@@ -142,7 +167,7 @@ def parse_schedule(file_bytes):
 
 
 def build_schedule_block(day_name, day_info):
-    """Формирует список пар с временем звонков и обедом (только существующие пары)"""
+    """Формирует список пар со временем (только фактические пары)"""
     if day_name == "ПОНЕДЕЛЬНИК":
         bells = BELL_SCHEDULE["ПОНЕДЕЛЬНИК"]
         lunch = LUNCH_SCHEDULE["ПОНЕДЕЛЬНИК"]
@@ -157,7 +182,6 @@ def build_schedule_block(day_name, day_info):
     if not pairs:
         return "<i>На этот день пар нет</i>"
 
-    # Сортировка по номеру пары
     def sort_key(item):
         num_part = item[0].split()[0]
         return int(num_part) if num_part.isdigit() else 99
@@ -173,7 +197,6 @@ def build_schedule_block(day_name, day_info):
 
         lines.append(f"{emoji} {time_part}{lesson}")
 
-        # Вставка обеда после второй пары
         if pair_name == "2 пара" and lunch:
             lines.append(f"    ↳ {lunch}")
 
@@ -181,7 +204,7 @@ def build_schedule_block(day_name, day_info):
 
 
 def format_new_date_message(day_name, day_info):
-    """Сообщение о выходе расписания на новую дату"""
+    """Сообщение о новом расписании"""
     date_str = day_info.get("date", "")
     header_date = f"{day_name}, {date_str}".strip(", ")
     schedule_text = build_schedule_block(day_name, day_info)
@@ -199,7 +222,7 @@ def format_new_date_message(day_name, day_info):
 
 
 def format_replacement_message(day_name, day_info, changes):
-    """Сообщение о точечной замене пар"""
+    """Сообщение о замене"""
     date_str = day_info.get("date", "")
     header_date = f"{day_name}, {date_str}".strip(", ")
 
@@ -246,7 +269,6 @@ def send_telegram_notification(text):
 
 
 def main():
-    # 1. Загрузка прошлого состояния
     state = {}
     if os.path.exists(STATE_FILE):
         try:
@@ -258,27 +280,26 @@ def main():
     last_sha = state.get("last_commit_sha")
     old_schedule = state.get("schedule", {})
 
-    # 2. Проверка обновления файла на GitHub
     current_sha = get_latest_commit_sha()
     if current_sha and current_sha == last_sha:
         print("Файл не менялся. Завершение работы.")
         return
 
-    # 3. Скачиваем свежий файл
-    print("Обнаружено обновление файла. Скачиваем...")
+    print("Скачиваем актуальный Excel...")
     excel_bytes = download_excel()
     new_schedule = parse_schedule(excel_bytes)
 
-    # 4. Первый запуск: сохраняем базу без отправки
-    if not old_schedule:
-        print("Первый запуск: снимок расписания сохранен в state.json.")
+    # Если это первый запуск или старые даты были пустыми — обновляем снимок
+    has_empty_old_dates = any(not info.get("date") for info in old_schedule.values()) if old_schedule else True
+
+    if not old_schedule or has_empty_old_dates:
+        print("Инициализация/исправление базы дат в state.json...")
         state["last_commit_sha"] = current_sha
         state["schedule"] = new_schedule
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
         return
 
-    # 5. Проверка изменений для группы 183р
     has_notified = False
 
     for day, new_info in new_schedule.items():
@@ -289,17 +310,17 @@ def main():
         old_date = old_info.get("date", "").strip()
         new_date = new_info.get("date", "").strip()
 
-        # СИТУАЦИЯ 1: Сменилась дата (выкатили новую неделю)
+        # СИТУАЦИЯ 1: Сменилась дата
         if new_date and old_date and new_date != old_date:
-            if new_pairs:  # Шлем только если есть хотя бы одна пара
+            if new_pairs:
                 print(f"Новая дата для {day}: {new_date}")
                 msg = format_new_date_message(day, new_info)
                 send_telegram_notification(msg)
                 has_notified = True
-                time.sleep(1)  # Защита от лимитов Telegram
+                time.sleep(1)
             continue
 
-        # СИТУАЦИЯ 2: Дата та же, но внутри дня есть замены пар
+        # СИТУАЦИЯ 2: Точечные замены
         all_pair_names = set(old_pairs.keys()).union(new_pairs.keys())
         day_changes = {}
 
@@ -317,9 +338,8 @@ def main():
             time.sleep(1)
 
     if not has_notified:
-        print("Файл обновился, но группу 183Р изменения не коснулись.")
+        print("Файл обновился, но группу 183Р изменения не затронули.")
 
-    # 6. Запоминаем новое состояние
     state["last_commit_sha"] = current_sha
     state["schedule"] = new_schedule
     with open(STATE_FILE, "w", encoding="utf-8") as f:
