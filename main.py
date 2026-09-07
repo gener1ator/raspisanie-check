@@ -2,11 +2,12 @@ import os
 import re
 import json
 import time
+import hashlib
 import requests
 import openpyxl
 from io import BytesIO
 from urllib.parse import quote
-from datetime import datetime, date
+from datetime import datetime, date, time as dtime, timedelta, timezone
 
 # ================= КОНФИГУРАЦИЯ =================
 REPO_OWNER = "colderuopen-art"
@@ -17,6 +18,9 @@ STATE_FILE = "state.json"
 
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
+
+# Часовой пояс (по умолчанию UTC+3, Москва). Можно изменить в Secrets репозитория.
+TIMEZONE_OFFSET = int(os.getenv("TIMEZONE_OFFSET", "5"))
 
 # Сетка звонков
 BELL_SCHEDULE = {
@@ -58,10 +62,17 @@ NUM_EMOJI = {
 }
 
 VALID_DAYS = ["ПОНЕДЕЛЬНИК", "ВТОРНИК", "СРЕДА", "ЧЕТВЕРГ", "ПЯТНИЦА", "СУББОТА"]
+DAY_NAMES_RU = ["ПОНЕДЕЛЬНИК", "ВТОРНИК", "СРЕДА", "ЧЕТВЕРГ", "ПЯТНИЦА", "СУББОТА", "ВОСКРЕСЕНЬЕ"]
+
+
+def get_local_now():
+    """Текущее локальное время с учетом часового пояса"""
+    tz = timezone(timedelta(hours=TIMEZONE_OFFSET))
+    return datetime.now(tz)
 
 
 def get_latest_commit_sha():
-    """Проверка коммита через GitHub API"""
+    """Проверка последнего коммита через GitHub API"""
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/commits?path={quote(FILE_PATH)}&page=1&per_page=1"
     try:
         res = requests.get(url, timeout=15)
@@ -75,7 +86,7 @@ def get_latest_commit_sha():
 
 
 def download_excel():
-    """Скачивание файла Excel в память"""
+    """Скачивание Excel-файла"""
     url = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/{quote(FILE_PATH)}"
     res = requests.get(url, timeout=30)
     if res.status_code != 200:
@@ -86,25 +97,18 @@ def download_excel():
 
 
 def extract_date_from_sheet(sheet):
-    """Универсальное извлечение даты из первых трех строк вкладки"""
+    """Извлечение даты из первых строк вкладки"""
     for row in sheet.iter_rows(min_row=1, max_row=3, values_only=False):
         for cell in row:
             val = cell.value
             if not val:
                 continue
-
-            # 1. Если ячейка имеет встроенный формат даты Excel
             if isinstance(val, (datetime, date)):
                 return val.strftime("%d.%m.%Y")
-
             val_str = str(val).strip()
-
-            # 2. Поиск формата 3.9.2026 или 03.09.2026
             match_dot = re.search(r"\b\d{1,2}\.\d{1,2}\.\d{2,4}\b", val_str)
             if match_dot:
                 return match_dot.group(0)
-
-            # 3. Поиск формата 2026-09-03
             match_iso = re.search(r"\b\d{4}-\d{1,2}-\d{1,2}\b", val_str)
             if match_iso:
                 try:
@@ -112,7 +116,6 @@ def extract_date_from_sheet(sheet):
                     return dt.strftime("%d.%m.%Y")
                 except Exception:
                     return match_iso.group(0)
-
     return ""
 
 
@@ -127,18 +130,14 @@ def parse_schedule(file_bytes):
             continue
 
         sheet = wb[sheet_name]
-
-        # 1. Надежный поиск даты
         date_str = extract_date_from_sheet(sheet)
 
-        # 2. Поиск номеров пар во 2-й строке
         pair_columns = {}
         for col_idx, cell in enumerate(sheet[2], start=1):
             val = str(cell.value or "").strip().lower()
             if "пара" in val:
                 pair_columns[col_idx] = cell.value.strip()
 
-        # 3. Поиск строки группы 183р
         group_row_idx = None
         for row_idx in range(3, sheet.max_row + 1):
             cell_val = str(sheet.cell(row=row_idx, column=1).value or "").strip().lower()
@@ -149,7 +148,6 @@ def parse_schedule(file_bytes):
         if not group_row_idx:
             continue
 
-        # 4. Сбор только заполненных пар
         day_pairs = {}
         for col_idx, pair_name in pair_columns.items():
             cell_val = sheet.cell(row=group_row_idx, column=col_idx).value
@@ -166,8 +164,65 @@ def parse_schedule(file_bytes):
     return schedule_data
 
 
+def get_pair_end_time(day_name, pair_name):
+    """Получение времени окончания пары в виде объекта datetime.time"""
+    if day_name == "ПОНЕДЕЛЬНИК":
+        bells = BELL_SCHEDULE["ПОНЕДЕЛЬНИК"]
+    elif day_name == "СУББОТА":
+        bells = BELL_SCHEDULE["СУББОТА"]
+    else:
+        bells = BELL_SCHEDULE["DEFAULT"]
+
+    time_range = bells.get(pair_name, "")
+    if time_range:
+        parts = re.split(r"[–-]", time_range)
+        if len(parts) == 2:
+            end_str = parts[1].strip()
+            try:
+                h, m = map(int, end_str.split(":"))
+                return dtime(h, m)
+            except Exception:
+                pass
+    return dtime(15, 0)
+
+
+def determine_target_day(schedule, now):
+    """
+    Определяет, на какой день сейчас должен висеть закреп:
+    - если сегодня учебный день и пары еще идут -> СЕГОДНЯ
+    - если сегодня пары кончились (или выходной) -> СЛЕДУЮЩИЙ УЧЕБНЫЙ ДЕНЬ
+    """
+    weekday_idx = now.weekday()
+    today_name = DAY_NAMES_RU[weekday_idx]
+    current_time = now.time()
+
+    today_info = schedule.get(today_name, {})
+    today_pairs = today_info.get("pairs", {})
+
+    # Если сегодня учебный день и у нас есть пары
+    if today_name in VALID_DAYS and today_pairs:
+        # Находим время конца последней пары за сегодня
+        end_times = [get_pair_end_time(today_name, p) for p in today_pairs.keys()]
+        latest_end_time = max(end_times) if end_times else dtime(15, 0)
+
+        # Если последняя пара еще не закончилась -> закрепляем СЕГОДНЯ
+        if current_time < latest_end_time:
+            return today_name, "СЕГОДНЯ"
+
+    # Иначе ищем ближайший следующий учебный день
+    for offset in range(1, 7):
+        next_idx = (weekday_idx + offset) % 7
+        candidate_day = DAY_NAMES_RU[next_idx]
+        candidate_info = schedule.get(candidate_day, {})
+        if candidate_day in VALID_DAYS and candidate_info.get("pairs"):
+            label = "ЗАВТРА" if offset == 1 else candidate_day
+            return candidate_day, label
+
+    return "ПОНЕДЕЛЬНИК", "ПОНЕДЕЛЬНИК"
+
+
 def build_schedule_block(day_name, day_info):
-    """Формирует список пар со временем (только фактические пары)"""
+    """Список пар со временем (только существующие пары)"""
     if day_name == "ПОНЕДЕЛЬНИК":
         bells = BELL_SCHEDULE["ПОНЕДЕЛЬНИК"]
         lunch = LUNCH_SCHEDULE["ПОНЕДЕЛЬНИК"]
@@ -196,33 +251,32 @@ def build_schedule_block(day_name, day_info):
         time_part = f"<b>{time_range}</b> | " if time_range else ""
 
         lines.append(f"{emoji} {time_part}{lesson}")
-
         if pair_name == "2 пара" and lunch:
             lines.append(f"    ↳ {lunch}")
 
     return "\n".join(lines)
 
 
-def format_new_date_message(day_name, day_info):
-    """Сообщение о новом расписании"""
+def format_pinned_message(day_name, day_info, label_text, now):
+    """Текст для закрепленного сообщения"""
     date_str = day_info.get("date", "")
     header_date = f"{day_name}, {date_str}".strip(", ")
     schedule_text = build_schedule_block(day_name, day_info)
-    now_time = datetime.now().strftime("%d.%m.%Y в %H:%M")
+    time_str = now.strftime("%H:%M")
 
     return (
-        f"📅 <b>Опубликовано расписание на дату!</b>\n\n"
+        f"📌 <b>РАСПИСАНИЕ НА {label_text.upper()}</b>\n\n"
         f"👥 <b>Группа:</b> {TARGET_GROUP.upper()}\n"
         f"📆 <b>{header_date}</b>\n\n"
         f"───────────────────\n"
-        f"📋 <b>АКТУАЛЬНОЕ РАСПИСАНИЕ:</b>\n"
+        f"📋 <b>АКТУАЛЬНЫЕ ПАРЫ:</b>\n"
         f"{schedule_text}\n\n"
-        f"<i>(Обновлено: {now_time})</i>"
+        f"<i>(Закреплено автоматически • {time_str})</i>"
     )
 
 
-def format_replacement_message(day_name, day_info, changes):
-    """Сообщение о замене"""
+def format_replacement_message(day_name, day_info, changes, now):
+    """Текст уведомления о замене пар"""
     date_str = day_info.get("date", "")
     header_date = f"{day_name}, {date_str}".strip(", ")
 
@@ -237,7 +291,7 @@ def format_replacement_message(day_name, day_info, changes):
 
     diff_text = "\n".join(diff_lines)
     schedule_text = build_schedule_block(day_name, day_info)
-    now_time = datetime.now().strftime("%d.%m.%Y в %H:%M")
+    now_time = now.strftime("%d.%m.%Y в %H:%M")
 
     return (
         f"🔔 <b>Внимание! Изменение в расписании</b>\n\n"
@@ -252,11 +306,10 @@ def format_replacement_message(day_name, day_info, changes):
     )
 
 
-def send_telegram_notification(text):
-    """Отправка сообщения в чат Telegram"""
+def send_telegram_message(text):
+    """Отправка сообщения в Telegram с возвратом ID сообщения"""
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        print("Ошибка: TG_BOT_TOKEN или TG_CHAT_ID не заданы!")
-        return
+        return None
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TG_CHAT_ID,
@@ -264,11 +317,58 @@ def send_telegram_notification(text):
         "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
-    res = requests.post(url, json=payload, timeout=10)
-    res.raise_for_status()
+    try:
+        res = requests.post(url, json=payload, timeout=10)
+        res.raise_for_status()
+        return res.json().get("result", {}).get("message_id")
+    except Exception as e:
+        print(f"Ошибка отправки сообщения: {e}")
+        return None
+
+
+def edit_telegram_message(message_id, text):
+    """Бесшумное редактирование сообщения"""
+    if not TG_BOT_TOKEN or not TG_CHAT_ID or not message_id:
+        return False
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/editMessageText"
+    payload = {
+        "chat_id": TG_CHAT_ID,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    }
+    try:
+        res = requests.post(url, json=payload, timeout=10)
+        res.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"Ошибка редактирования сообщения {message_id}: {e}")
+        return False
+
+
+def pin_telegram_message(message_id):
+    """Закрепление сообщения в чате"""
+    if not TG_BOT_TOKEN or not TG_CHAT_ID or not message_id:
+        return
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/pinChatMessage"
+    payload = {
+        "chat_id": TG_CHAT_ID,
+        "message_id": message_id,
+        "disable_notification": True  # Закреплять тихо, без громкого звука
+    }
+    try:
+        res = requests.post(url, json=payload, timeout=10)
+        res.raise_for_status()
+        print(f"Сообщение {message_id} успешно закреплено!")
+    except Exception as e:
+        print(f"Ошибка закрепления: проверьте права бота на закреп в чате! ({e})")
 
 
 def main():
+    now = get_local_now()
+
+    # 1. Загружаем память
     state = {}
     if os.path.exists(STATE_FILE):
         try:
@@ -280,67 +380,84 @@ def main():
     last_sha = state.get("last_commit_sha")
     old_schedule = state.get("schedule", {})
 
+    # 2. Проверяем коммит в репозитории
     current_sha = get_latest_commit_sha()
-    if current_sha and current_sha == last_sha:
-        print("Файл не менялся. Завершение работы.")
-        return
+    excel_downloaded = False
+    new_schedule = old_schedule
 
-    print("Скачиваем актуальный Excel...")
-    excel_bytes = download_excel()
-    new_schedule = parse_schedule(excel_bytes)
+    if current_sha and current_sha != last_sha:
+        print("Обнаружен новый коммит. Скачиваем Excel...")
+        try:
+            excel_bytes = download_excel()
+            new_schedule = parse_schedule(excel_bytes)
+            excel_downloaded = True
+            state["last_commit_sha"] = current_sha
+        except Exception as e:
+            print(f"Ошибка парсинга Excel: {e}")
 
-    # Если это первый запуск или старые даты были пустыми — обновляем снимок
-    has_empty_old_dates = any(not info.get("date") for info in old_schedule.values()) if old_schedule else True
+    # 3. Отправка уведомлений о заменах (если файл обновлялся)
+    if excel_downloaded and old_schedule:
+        for day, new_info in new_schedule.items():
+            old_info = old_schedule.get(day, {"pairs": {}, "date": ""})
+            old_pairs = old_info.get("pairs", {})
+            new_pairs = new_info.get("pairs", {})
 
-    if not old_schedule or has_empty_old_dates:
-        print("Инициализация/исправление базы дат в state.json...")
-        state["last_commit_sha"] = current_sha
-        state["schedule"] = new_schedule
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-        return
+            old_date = old_info.get("date", "").strip()
+            new_date = new_info.get("date", "").strip()
 
-    has_notified = False
+            # Точечные замены
+            all_pair_names = set(old_pairs.keys()).union(new_pairs.keys())
+            day_changes = {}
+            for p_name in all_pair_names:
+                old_val = old_pairs.get(p_name)
+                new_val = new_pairs.get(p_name)
+                if old_val != new_val:
+                    day_changes[p_name] = (old_val, new_val)
 
-    for day, new_info in new_schedule.items():
-        old_info = old_schedule.get(day, {"pairs": {}, "date": ""})
-        old_pairs = old_info.get("pairs", {})
-        new_pairs = new_info.get("pairs", {})
-
-        old_date = old_info.get("date", "").strip()
-        new_date = new_info.get("date", "").strip()
-
-        # СИТУАЦИЯ 1: Сменилась дата
-        if new_date and old_date and new_date != old_date:
-            if new_pairs:
-                print(f"Новая дата для {day}: {new_date}")
-                msg = format_new_date_message(day, new_info)
-                send_telegram_notification(msg)
-                has_notified = True
+            if day_changes and new_date == old_date:
+                print(f"Замена на {day} для 183Р!")
+                msg = format_replacement_message(day, new_info, day_changes, now)
+                send_telegram_message(msg)
                 time.sleep(1)
-            continue
 
-        # СИТУАЦИЯ 2: Точечные замены
-        all_pair_names = set(old_pairs.keys()).union(new_pairs.keys())
-        day_changes = {}
+    # 4. ЛОГИКА ЗАКРЕПА (выполняется при каждом запуске!)
+    if new_schedule:
+        target_day, label_text = determine_target_day(new_schedule, now)
+        target_info = new_schedule.get(target_day)
 
-        for p_name in all_pair_names:
-            old_val = old_pairs.get(p_name)
-            new_val = new_pairs.get(p_name)
-            if old_val != new_val:
-                day_changes[p_name] = (old_val, new_val)
+        if target_info:
+            pinned_text = format_pinned_message(target_day, target_info, label_text, now)
+            text_hash = hashlib.md5(pinned_text.encode("utf-8")).hexdigest()
 
-        if day_changes:
-            print(f"Замены на {day} для 183р")
-            msg = format_replacement_message(day, new_info, day_changes)
-            send_telegram_notification(msg)
-            has_notified = True
-            time.sleep(1)
+            saved_pinned_day = state.get("pinned_day")
+            saved_msg_id = state.get("pinned_message_id")
+            saved_hash = state.get("pinned_text_hash")
 
-    if not has_notified:
-        print("Файл обновился, но группу 183Р изменения не затронули.")
+            # Случай А: День закрепа сменился (учебный день закончился) или закрепа еще нет
+            if saved_pinned_day != target_day or not saved_msg_id:
+                print(f"Переключение закрепа на: {target_day} ({label_text})")
+                new_msg_id = send_telegram_message(pinned_text)
+                if new_msg_id:
+                    pin_telegram_message(new_msg_id)
+                    state["pinned_day"] = target_day
+                    state["pinned_message_id"] = new_msg_id
+                    state["pinned_text_hash"] = text_hash
 
-    state["last_commit_sha"] = current_sha
+            # Случай Б: День тот же, но поменялись пары -> просто редактируем закреп
+            elif saved_hash != text_hash:
+                print(f"Обновление текста в существующем закрепе {saved_msg_id}")
+                success = edit_telegram_message(saved_msg_id, pinned_text)
+                if success:
+                    state["pinned_text_hash"] = text_hash
+                else:
+                    # Если сообщение удалили руками, шлем и крепим заново
+                    new_msg_id = send_telegram_message(pinned_text)
+                    if new_msg_id:
+                        pin_telegram_message(new_msg_id)
+                        state["pinned_message_id"] = new_msg_id
+                        state["pinned_text_hash"] = text_hash
+
+    # 5. Сохраняем состояние
     state["schedule"] = new_schedule
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
