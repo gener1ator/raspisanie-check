@@ -1,5 +1,5 @@
 {
-  "last_commit_sha": "25d3a9cdbb28ad129b3aee6d47d14454acac4490",
+  "last_commit_sha": "47f2da373a70ce0c340979f0a719b38cb2ac5a47",
   "schedule": {
     "ПОНЕДЕЛЬНИК": {
       "date": "07.09.2026",
@@ -42,14 +42,14 @@
       }
     },
     "СУББОТА": {
-      "date": "06.06.2026",
+      "date": "13.06.2026",
       "pairs": {
-        "2 пара": "Обществознание/411",
-        "3 пара": "Иностр.яз./410"
+        "3 пара": "Ин.язык/312/314",
+        "4 пара": "История/310"
       }
     }
   },
   "pinned_day": "СРЕДА",
   "pinned_message_id": 18,
-  "pinned_text_hash": "a493da804871fbcfa254ebec171cb283"
+  "pinned_text_hash": "10efc668e61378ef79f663cb195209b3"
 }
