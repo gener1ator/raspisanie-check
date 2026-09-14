@@ -1,5 +1,5 @@
 {
-  "last_commit_sha": "ffb78ffb61e3c566ef65d0a7c80eaeedccf03bc4",
+  "last_commit_sha": "7ed9a1bd06a73d0da7f97a3382345a21fac6ad57",
   "schedule": {
     "ПОНЕДЕЛЬНИК": {
       "date": "14.09.2026",
@@ -35,7 +35,11 @@
     },
     "ПЯТНИЦА": {
       "date": "18.09.2026",
-      "pairs": {}
+      "pairs": {
+        "1 пара": "Литература/404",
+        "2 пара": "Информатика/400",
+        "3 пара": "Проект.деят/231(Щ)"
+      }
     },
     "СУББОТА": {
       "date": "19.09.2026",
@@ -44,5 +48,5 @@
   },
   "pinned_day": "ВТОРНИК",
   "pinned_message_id": 36,
-  "pinned_text_hash": "cb69ba5704cae2670a4988f0524dbfde"
+  "pinned_text_hash": "0798180b12cf3dee3a7c72eeb436a28b"
 }
