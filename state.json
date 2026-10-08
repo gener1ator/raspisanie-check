@@ -1,5 +1,5 @@
 {
-  "last_commit_sha": "38a69c86520433729a16193817ce0aeed652595f",
+  "last_commit_sha": "d0c1ddf16d4992be360f0e681091259d9e91025f",
   "schedule": {
     "ПОНЕДЕЛЬНИК": {
       "date": "05.10.2026",
@@ -38,7 +38,7 @@
       "date": "09.10.2026",
       "pairs": {
         "1 пара": "Литература/404",
-        "2 пара": "Математика/227",
+        "2 пара": "Математика/405",
         "3 пара": "ОБЗР/231"
       }
     },
@@ -53,5 +53,5 @@
   },
   "pinned_day": "ЧЕТВЕРГ",
   "pinned_message_id": 108,
-  "pinned_text_hash": "caa3366a801dec0f3b576ca77ce09803"
+  "pinned_text_hash": "32cfcc26461fc04ecc5d91fbde8e49ff"
 }
