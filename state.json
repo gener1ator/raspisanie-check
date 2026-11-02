@@ -1,5 +1,5 @@
 {
-  "last_commit_sha": "0f2d83ca9a391c3caffecfcbc5b959f33d9b7fd0",
+  "last_commit_sha": "648aeb4ef1078389b75e33d75ee2018cceae06a0",
   "schedule": {
     "ПОНЕДЕЛЬНИК": {
       "date": "02.11.2026",
@@ -39,10 +39,14 @@
     },
     "СУББОТА": {
       "date": "07.11.2026",
-      "pairs": {}
+      "pairs": {
+        "1 пара": "Ин. язык/312/314",
+        "2 пара": "История/310",
+        "3 пара": "Физкультура (К)"
+      }
     }
   },
   "pinned_day": "ВТОРНИК",
   "pinned_message_id": 195,
-  "pinned_text_hash": "0b60f113d00f2f3c8541619dc4faa125"
+  "pinned_text_hash": "1551434f2dbbce99988b8660426a6d43"
 }
