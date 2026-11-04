@@ -1,7 +1,6 @@
 name: Check Schedule
 
 on:
-  schedule:
   workflow_dispatch:
 
 permissions:
