@@ -2,8 +2,6 @@ name: Check Schedule
 
 on:
   schedule:
-    # Запуск в «некруглые» минуты: 7, 22, 37 и 52 минуты каждого часа (очередь в разы меньше!)
-    - cron: '7,22,37,52 * * * *'
   workflow_dispatch:
 
 permissions:
