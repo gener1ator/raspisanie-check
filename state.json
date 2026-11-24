@@ -1,5 +1,5 @@
 {
-  "last_commit_sha": "06b132cff3dce43543f6749c4a96c0ccdee8ed7b",
+  "last_commit_sha": "9b300f08f645805cb8f07678d9f8b7328c73671d",
   "schedule": {
     "ПОНЕДЕЛЬНИК": {
       "date": "23.11.2026",
@@ -53,5 +53,5 @@
   },
   "pinned_day": "СРЕДА",
   "pinned_message_id": 278,
-  "pinned_text_hash": "c111a07b3561c2c5bcdfc72235cea694"
+  "pinned_text_hash": "423796d46847b890e6e6f47573a43c0f"
 }
